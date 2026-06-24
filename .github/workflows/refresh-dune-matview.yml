@@ -1,0 +1,47 @@
+name: Refresh Dune sunrise volume table
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Use deploy to create/update the saved query and materialized view."
+        required: true
+        default: "refresh"
+        type: choice
+        options:
+          - refresh
+          - deploy
+      create_query:
+        description: "Only for the first deploy when DUNE_QUERY_ID is not set."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  dune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Deploy or refresh Dune materialized view
+        run: python scripts/deploy_matview.py "${DUNE_ACTION}"
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          DUNE_QUERY_ID: ${{ vars.DUNE_QUERY_ID }}
+          DUNE_MATVIEW_FULL_NAME: ${{ vars.DUNE_MATVIEW_FULL_NAME }}
+          DUNE_ACTION: ${{ github.event.inputs.action || 'refresh' }}
+          DUNE_CREATE_QUERY: ${{ github.event.inputs.create_query || 'false' }}
+          DUNE_MATVIEW_NAME: result_sunrise_tokens_dex_volume_7d
+          DUNE_PERFORMANCE: medium
+          DUNE_PRIVATE: "true"
