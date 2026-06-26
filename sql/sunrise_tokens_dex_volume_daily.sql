@@ -1,5 +1,10 @@
--- Source query for dune.<team>.result_sunrise_tokens_dex_volume_7d
--- Seven-day buckets are anchored on 2025-10-10 and include data through current_date.
+-- Parameterized DuneSQL source query.
+-- The Python sync script executes this saved query repeatedly with:
+--   start_date: inclusive YYYY-MM-DD
+--   end_date: exclusive YYYY-MM-DD
+--
+-- This returns daily volume. Historical fetching in 7-day windows is handled
+-- by scripts/sync_sunrise_dune_volume.py, not by aggregating 7-day volume.
 WITH token_mints(token_mint_address) AS (
     VALUES
         ('CrAr4RRJMBVwRsZtT62pEhfA9H5utymC2mVx8e7FreP2'),
@@ -40,8 +45,8 @@ trade_sides AS (
     FROM dex_solana.trades AS dt
     INNER JOIN sunrise_tokens AS st
         ON dt.token_sold_mint_address = st.token_mint_address
-    WHERE dt.block_date >= DATE '2025-10-10'
-        AND dt.block_date <= CURRENT_DATE
+    WHERE dt.block_date >= CAST('{{start_date}}' AS date)
+        AND dt.block_date < CAST('{{end_date}}' AS date)
         AND dt.amount_usd > 0
 
     UNION ALL
@@ -55,33 +60,19 @@ trade_sides AS (
     FROM dex_solana.trades AS dt
     INNER JOIN sunrise_tokens AS st
         ON dt.token_bought_mint_address = st.token_mint_address
-    WHERE dt.block_date >= DATE '2025-10-10'
-        AND dt.block_date <= CURRENT_DATE
+    WHERE dt.block_date >= CAST('{{start_date}}' AS date)
+        AND dt.block_date < CAST('{{end_date}}' AS date)
         AND dt.amount_usd > 0
         AND dt.token_bought_mint_address <> dt.token_sold_mint_address
-),
-bucketed_trade_sides AS (
-    SELECT
-        DATE_ADD(
-            'day',
-            7 * CAST(FLOOR(DATE_DIFF('day', DATE '2025-10-10', block_date) / 7) AS integer),
-            DATE '2025-10-10'
-        ) AS bucket_start_date,
-        token_mint_address,
-        symbol,
-        amount_usd,
-        side
-    FROM trade_sides
 )
 SELECT
-    bucket_start_date,
-    LEAST(DATE_ADD('day', 6, bucket_start_date), CURRENT_DATE) AS bucket_end_date,
+    block_date,
     token_mint_address,
     symbol,
     CAST(SUM(amount_usd) AS double) AS volume_usd,
     CAST(SUM(CASE WHEN side = 'bought' THEN amount_usd ELSE 0 END) AS double) AS bought_volume_usd,
     CAST(SUM(CASE WHEN side = 'sold' THEN amount_usd ELSE 0 END) AS double) AS sold_volume_usd,
-    COUNT(*) AS trade_side_count,
-    CURRENT_TIMESTAMP AS refreshed_at
-FROM bucketed_trade_sides
-GROUP BY 1, 2, 3, 4
+    COUNT(*) AS trade_side_count
+FROM trade_sides
+GROUP BY 1, 2, 3
+ORDER BY 1, 4 DESC

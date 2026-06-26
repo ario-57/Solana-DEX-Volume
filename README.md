@@ -1,89 +1,130 @@
-# Sunrise Tokens Dune Volume Table
+# Sunrise Tokens Dune API Sync
 
-This bundle creates and refreshes a Dune materialized view for Sunrise token DEX volume on Solana.
+This repo pulls Sunrise token DEX volume from Dune with the Dune API. It does **not** use a materialized view.
 
-The resulting table is:
+The output table is a normal CSV data table in this repo:
 
-```sql
-dune.<team>.result_sunrise_tokens_dex_volume_7d
+```text
+data/sunrise_tokens_dex_volume_daily.csv
 ```
 
-The source SQL produces non-overlapping seven-day buckets anchored on `DATE '2025-10-10'` and includes data through `CURRENT_DATE`.
+Optionally, the same CSV can be synced into a Dune Uploads table:
+
+```sql
+dune.<namespace>.sunrise_tokens_dex_volume_daily
+```
+
+## What The Script Does
+
+1. Creates or updates one saved, parameterized Dune query.
+2. Runs that query through the Dune execution API with `start_date` and `end_date` parameters.
+3. For historical backfill, loops from `2025-10-10` to today in 7-day API windows.
+4. Stores daily token volume rows in `data/sunrise_tokens_dex_volume_daily.csv`.
+5. On daily refresh, re-fetches only the latest rolling window, defaulting to the last 2 days, then merges by `(block_date, token_mint_address)`.
+6. Optionally clears and reloads a Dune Uploads table with the merged CSV.
+
+The SQL returns daily volume. The 7-day interval is only the API backfill chunk size.
 
 ## Files
 
-- `sql/sunrise_tokens_dex_volume_7d.sql`: optimized DuneSQL source query.
-- `scripts/deploy_matview.py`: Dune API helper for deploying or refreshing the materialized view.
-- `.github/workflows/refresh-dune-matview.yml`: GitHub Actions workflow that refreshes the table every 24 hours.
-- `.env.example`: local environment variable template.
-
-## SQL Optimization Notes
-
-- Uses a small `VALUES` table for the token allowlist instead of `SELECT *` from token metadata.
-- Selects only the token metadata columns needed for the output.
-- Replaces the `OR` join across bought/sold mint columns with two `UNION ALL` branches. This is easier for Dune/Trino to plan and preserves per-token volume when both sides of a trade are Sunrise tokens.
-- Filters `dex_solana.trades` by `block_date >= DATE '2025-10-10'` in both branches so partition pruning can apply.
-- Avoids sorting inside the materialized-view query. Sort when reading the table.
+- `sql/sunrise_tokens_dex_volume_daily.sql`: parameterized DuneSQL query.
+- `scripts/sync_sunrise_dune_volume.py`: Dune API extraction, CSV merge, and optional Dune Uploads sync.
+- `.github/workflows/sync-sunrise-dune-volume.yml`: daily GitHub Actions refresh.
+- `data/sunrise_tokens_dex_volume_daily.csv`: generated data table after bootstrap/refresh.
 
 ## GitHub Setup
 
-The workflow expects this folder layout at a GitHub repository root so the workflow lives at:
+Add this repository secret:
 
-```text
-.github/workflows/refresh-dune-matview.yml
-```
+- `DUNE_API_KEY`: Dune API key. Query execution needs `Read`; creating saved queries and upload tables needs `Read/Write`.
 
-Add these GitHub repository settings:
+Add these repository variables:
 
-- Secret `DUNE_API_KEY`: use a Dune API key with `Read/Write` scope for deploys. Refresh-only runs need `Read`, but `Read/Write` is simplest.
-- Variable `DUNE_QUERY_ID`: set this after the first deploy creates the query.
-- Variable `DUNE_MATVIEW_FULL_NAME`: optional, but recommended after the first deploy prints the full table name, for example `dune.myteam.result_sunrise_tokens_dex_volume_7d`.
+- `DUNE_QUERY_ID`: set after the first `deploy-query` run creates the saved query.
+- `DUNE_SYNC_UPLOAD`: optional, set to `true` to also sync into a Dune Uploads table.
+- `DUNE_UPLOAD_NAMESPACE`: required only when `DUNE_SYNC_UPLOAD=true`, for example your Dune user or team namespace.
 
-## First Deploy
+## First Run
 
-Run the workflow manually with:
+Run the workflow manually:
 
-- `action`: `deploy`
+- `action`: `deploy-query`
 - `create_query`: `true`
 
-The log will print a new `query_id`. Save that value as the GitHub repository variable `DUNE_QUERY_ID`.
+The logs will print a Dune `query_id`. Save that as repository variable `DUNE_QUERY_ID`.
 
-After that, manual deploys can use:
+Then run the workflow manually again:
 
-- `action`: `deploy`
-- `create_query`: `false`
+- `action`: `bootstrap`
+- `sync_upload_table`: optional
 
-Scheduled runs use `refresh` and run daily at `03:23 UTC`.
+This backfills from `2025-10-10` to today in 7-day chunks and commits the generated CSV table.
 
-## Local Deploy Or Refresh
+## Daily Refresh
+
+The scheduled workflow runs every day at `03:23 UTC` with:
+
+- `action`: `refresh`
+
+Refresh mode reads the existing CSV, re-fetches the latest 2 days from Dune, merges by `(block_date, token_mint_address)`, and commits the changed data files.
+
+## Local Usage
+
+Create or update the saved Dune query:
 
 ```powershell
 $env:DUNE_API_KEY = "..."
 $env:DUNE_CREATE_QUERY = "true"
-python .\scripts\deploy_matview.py deploy
+python .\scripts\sync_sunrise_dune_volume.py deploy-query
 ```
 
-After saving the printed query id:
+Backfill historical data:
 
 ```powershell
 $env:DUNE_QUERY_ID = "1234567"
-python .\scripts\deploy_matview.py deploy
-python .\scripts\deploy_matview.py refresh
+python .\scripts\sync_sunrise_dune_volume.py bootstrap
 ```
 
-## Query The Table
+Refresh recent data:
+
+```powershell
+python .\scripts\sync_sunrise_dune_volume.py refresh
+```
+
+Also sync to a Dune Uploads table:
+
+```powershell
+$env:DUNE_SYNC_UPLOAD = "true"
+$env:DUNE_UPLOAD_NAMESPACE = "your_namespace"
+python .\scripts\sync_sunrise_dune_volume.py refresh
+```
+
+## CSV Schema
+
+```text
+block_date
+token_mint_address
+symbol
+volume_usd
+bought_volume_usd
+sold_volume_usd
+trade_side_count
+source_window_start
+source_window_end
+fetched_at_utc
+```
+
+## Querying The Optional Dune Uploads Table
 
 ```sql
 SELECT
-    bucket_start_date,
-    bucket_end_date,
+    block_date,
     token_mint_address,
     symbol,
     volume_usd,
     bought_volume_usd,
     sold_volume_usd,
-    trade_side_count,
-    refreshed_at
-FROM dune.<team>.result_sunrise_tokens_dex_volume_7d
-ORDER BY bucket_start_date DESC, volume_usd DESC;
+    trade_side_count
+FROM dune.<namespace>.sunrise_tokens_dex_volume_daily
+ORDER BY block_date DESC, volume_usd DESC;
 ```
