@@ -1,0 +1,69 @@
+name: Sync Sunrise Dune volume data
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy-query creates/updates the Dune saved query; bootstrap backfills from 2025-10-10; refresh updates recent days."
+        required: true
+        default: "refresh"
+        type: choice
+        options:
+          - refresh
+          - bootstrap
+          - deploy-query
+      create_query:
+        description: "Use true only for the first deploy-query run when DUNE_QUERY_ID is not set."
+        required: false
+        default: false
+        type: boolean
+      sync_upload_table:
+        description: "Also sync the CSV into a Dune Uploads table."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch Dune data
+        run: python scripts/sync_sunrise_dune_volume.py "${DUNE_ACTION}"
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          DUNE_QUERY_ID: ${{ vars.DUNE_QUERY_ID }}
+          DUNE_ACTION: ${{ github.event.inputs.action || 'refresh' }}
+          DUNE_CREATE_QUERY: ${{ github.event.inputs.create_query || 'false' }}
+          DUNE_PERFORMANCE: medium
+          DUNE_HISTORICAL_START: "2025-10-10"
+          DUNE_WINDOW_DAYS: "7"
+          DUNE_REFRESH_LOOKBACK_DAYS: "2"
+          DUNE_SYNC_UPLOAD: ${{ github.event.inputs.sync_upload_table || vars.DUNE_SYNC_UPLOAD || 'false' }}
+          DUNE_UPLOAD_NAMESPACE: ${{ vars.DUNE_UPLOAD_NAMESPACE }}
+          DUNE_UPLOAD_TABLE: sunrise_tokens_dex_volume_daily
+
+      - name: Commit refreshed data table
+        if: ${{ github.event.inputs.action != 'deploy-query' }}
+        run: |
+          if [[ -n "$(git status --porcelain data/sunrise_tokens_dex_volume_daily.csv data/sunrise_tokens_dex_volume_state.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/sunrise_tokens_dex_volume_daily.csv data/sunrise_tokens_dex_volume_state.json
+            git commit -m "refresh sunrise dune volume data"
+            git push
+          else
+            echo "No data changes to commit."
+          fi
